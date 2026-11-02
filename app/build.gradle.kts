@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.tidal_discord"
+    namespace = "io.github.lazzurite.tidaldiscord"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.tidal_discord"
+        applicationId = "io.github.lazzurite.tidaldiscord"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
