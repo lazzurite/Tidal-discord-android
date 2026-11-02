@@ -58,9 +58,9 @@ Due to enhanced security policies on Android 13/14+ (especially on Samsung One U
 4. Enable the toggle for **Tidal & HiBy Discord**.
 5. *(Recommended)* Set **Battery usage** to **Unrestricted** to prevent background hibernation during screen-off playback.
 
-### 3. Connect to Discord
+### 3. Connect to Discord (The most difficult step I know bruh)
 1. Open Discord in your desktop browser (or mobile browser in desktop mode).
-2. Press `F12` to open DevTools, navigate to the **Network** tab, filter by `api`, and copy your `Authorization` header value.
+2. Press `F12` to open DevTools, navigate to the **Network** tab, filter by `api`, click on any connection, for example **science**,  navigate **Headers** tab, find **Request Headers** and then copy your `Authorization` header value.
 3. Paste the token into the app's **Discord Token** input field and tap **Save & Connect**.
 4. Start playing any song in TIDAL or HiBy Music — your status will appear instantly.
 
