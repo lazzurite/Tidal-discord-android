@@ -21,7 +21,7 @@ const (
 
 var (
 	mu           sync.Mutex
-	writeMu      sync.Mutex // Защита параллельной записи в WebSocket
+	writeMu      sync.Mutex // Websocket protection
 	userToken    string
 	wsConn       *websocket.Conn
 	stopChan     chan struct{}
@@ -116,7 +116,7 @@ func runSession(token string, stop <-chan struct{}) error {
 		mu.Unlock()
 	}()
 
-	// 1. Ждём Opcode 10 (Hello)
+	// 1. Waiting for Opcode 10 (Hello)
 	var helloMsg gatewayPayload
 	if err := conn.ReadJSON(&helloMsg); err != nil {
 		return err
@@ -130,7 +130,7 @@ func runSession(token string, stop <-chan struct{}) error {
 		return err
 	}
 
-	// 2. Отправляем Opcode 2 (Identify)
+	// 2 Sending Opcode 10 (Identify)
 	identify := map[string]interface{}{
 		"op": 2,
 		"d": map[string]interface{}{
@@ -151,7 +151,7 @@ func runSession(token string, stop <-chan struct{}) error {
 		return err
 	}
 
-	// 3. Запускаем Heartbeat
+	// 3. Launching Heartbeat
 	hbDone := make(chan struct{})
 	defer close(hbDone)
 
@@ -180,7 +180,7 @@ func runSession(token string, stop <-chan struct{}) error {
 		}
 	}()
 
-	// 4. Слушаем события. Разрешаем отправку только ПОСЛЕ события READY!
+	// 4. Listening events
 	for {
 		select {
 		case <-stop:
@@ -193,7 +193,7 @@ func runSession(token string, stop <-chan struct{}) error {
 			return err
 		}
 
-		// Discord подтвердил авторизацию
+		// Discord approved auth
 		if msg.Op == 0 && (msg.T == "READY" || msg.T == "RESUMED") {
 			log.Println("[GoDiscord] Gateway authenticated (READY received)")
 			mu.Lock()
@@ -266,7 +266,7 @@ func sendPresence(t Track) {
 
 		stateText := t.Artist
 		if !t.Playing {
-			stateText = t.Artist + " ⏸️"
+			stateText = t.Artist + " Paused ⏸️"
 		}
 
 		activity := map[string]interface{}{
@@ -276,7 +276,7 @@ func sendPresence(t Track) {
 			"details":        t.Title,
 			"state":          stateText,
 			"buttons": []string{
-				"Слушать на YouTube",
+				"Listen on YouTube",
 			},
 			"metadata": map[string]interface{}{
 				"button_urls": []string{
@@ -285,7 +285,7 @@ func sendPresence(t Track) {
 			},
 		}
 
-		// Ползунок времени передаем ТОЛЬКО когда музыка реально воспроизводится
+		// Only when music plays
 		if t.Playing {
 			startMs := nowMs - t.PositionMs
 			if t.DurationMs > 0 {
@@ -300,7 +300,7 @@ func sendPresence(t Track) {
 			}
 		}
 
-		// Обложка альбома
+		// Album picture
 		assets := map[string]string{}
 		if t.Album != "" {
 			assets["large_text"] = t.Album

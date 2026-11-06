@@ -64,13 +64,13 @@ class MainActivity : ComponentActivity() {
                                 Bridge.startDiscord(token.trim())
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Токен сохранён, подключение к Discord запущено",
+                                    "Token saved, discord connection launched",
                                     Toast.LENGTH_SHORT
                                 ).show()
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Сохранить и подключить")
+                            Text("Save and connect")
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Разрешить доступ к уведомлениям")
+                            Text("Give permission for access to notifications")
                         }
                     }
                 }
