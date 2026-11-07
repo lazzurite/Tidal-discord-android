@@ -46,15 +46,19 @@ class MediaListenerService : NotificationListenerService() {
             Bridge.startDiscord(token)
         }
 
-        sessionManager = getSystemService(MediaSessionManager::class.java)
-        val component = ComponentName(this, MediaListenerService::class.java)
+        try {
+            sessionManager = getSystemService(MediaSessionManager::class.java)
+            val component = ComponentName(this, MediaListenerService::class.java)
 
-        sessionManager.addOnActiveSessionsChangedListener(sessionListener, component)
+            sessionManager.addOnActiveSessionsChangedListener(sessionListener, component)
 
-        sessionManager.getActiveSessions(component).forEach { controller ->
-            if (isSupportedPackage(controller.packageName)) {
-                registerController(controller)
+            sessionManager.getActiveSessions(component).forEach { controller ->
+                if (isSupportedPackage(controller.packageName)) {
+                    registerController(controller)
+                }
             }
+        } catch (e: Exception) {
+            Log.e("TidalDiscord", "Failed to attach MediaSessionManager", e)
         }
     }
 
@@ -115,12 +119,14 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
-        if (::sessionManager.isInitialized) {
-            sessionManager.removeOnActiveSessionsChangedListener(sessionListener)
-        }
-        for ((controller, callback) in controllers) {
-            controller.unregisterCallback(callback)
-        }
+        try {
+            if (::sessionManager.isInitialized) {
+                sessionManager.removeOnActiveSessionsChangedListener(sessionListener)
+            }
+            for ((controller, callback) in controllers) {
+                controller.unregisterCallback(callback)
+            }
+        } catch (_: Exception) {}
         controllers.clear()
         Bridge.stopDiscord()
         super.onListenerDisconnected()

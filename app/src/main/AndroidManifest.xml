@@ -15,7 +15,7 @@
         android:theme="@style/Theme.Tidaldiscord">
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.example.tidal_discord.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.Tidaldiscord"
@@ -29,8 +29,8 @@
         </activity>
 
         <service
-            android:name=".MediaListenerService"
-            android:label="Tidal and HiBy Discord"
+            android:name="com.example.tidal_discord.MediaListenerService"
+            android:label="TIDAL and HiBy Discord"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
             android:exported="true">
 
