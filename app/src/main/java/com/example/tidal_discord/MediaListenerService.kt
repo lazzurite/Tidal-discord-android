@@ -91,6 +91,13 @@ class MediaListenerService : NotificationListenerService() {
     private fun sendTrackToGo(controller: MediaController) {
         val metadata = controller.metadata
         val state = controller.playbackState
+        val pbState = state?.state ?: PlaybackState.STATE_NONE
+
+        // Если плеер полностью остановлен или закрыт — очищаем статус
+        if (pbState == PlaybackState.STATE_STOPPED || pbState == PlaybackState.STATE_NONE || pbState == PlaybackState.STATE_ERROR) {
+            Bridge.updateTrack(playerDisplayName(controller.packageName), "", "", "", false, 0L, 0L)
+            return
+        }
 
         val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
             ?.takeIf { it.isNotBlank() }
@@ -105,7 +112,7 @@ class MediaListenerService : NotificationListenerService() {
         val album = metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
         val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
         val position = state?.position ?: 0L
-        val playing = state?.state == PlaybackState.STATE_PLAYING && title.isNotBlank()
+        val playing = pbState == PlaybackState.STATE_PLAYING && title.isNotBlank()
 
         Bridge.updateTrack(
             playerDisplayName(controller.packageName),

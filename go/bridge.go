@@ -17,23 +17,34 @@ import (
 const (
 	discordAppID = "1554196425028669551"
 	gatewayURL   = "wss://gateway.discord.gg/?v=10&encoding=json"
+	idleTimeout  = 2 * time.Minute // Disconnect WebSocket after 2 minutes of pause
 )
 
 var (
 	mu           sync.Mutex
-	writeMu      sync.Mutex // Websocket protection
+	writeMu      sync.Mutex
 	userToken    string
 	wsConn       *websocket.Conn
 	stopChan     chan struct{}
+	isLooping    bool
 	isConnected  bool
 	currentTrack Track
-	artCache     = make(map[string]string)
-	httpClient   = &http.Client{Timeout: 8 * time.Second}
+	stateSeq     uint64
+	idleTimer    *time.Timer
+
+	// Session state for lightweight RESUME instead of heavy IDENTIFY
+	sessionID  string
+	resumeURL  string
+	lastSeq    *int64
+
+	artCache   = make(map[string]string)
+	httpClient = &http.Client{Timeout: 8 * time.Second}
 )
 
 type gatewayPayload struct {
 	Op int             `json:"op"`
 	D  json.RawMessage `json:"d"`
+	S  *int64          `json:"s,omitempty"`
 	T  string          `json:"t,omitempty"`
 }
 
@@ -41,6 +52,12 @@ type helloData struct {
 	HeartbeatInterval int `json:"heartbeat_interval"`
 }
 
+type readyData struct {
+	SessionID        string `json:"session_id"`
+	ResumeGatewayURL string `json:"resume_gateway_url"`
+}
+
+// StartDiscord saves the token and connects ONLY if music is currently playing.
 func StartDiscord(token string) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -48,36 +65,84 @@ func StartDiscord(token string) {
 	}
 
 	mu.Lock()
-	if isConnected && userToken == token {
+	tokenChanged := userToken != token
+	userToken = token
+
+	if tokenChanged {
+		sessionID = ""
+		resumeURL = ""
+		lastSeq = nil
+	}
+
+	shouldConnect := currentTrack.Playing && currentTrack.Title != ""
+	mu.Unlock()
+
+	if tokenChanged && isLoopRunning() {
+		stopLoopInternal()
+	}
+
+	if shouldConnect {
+		ensureConnected()
+	}
+}
+
+func StopDiscord() {
+	mu.Lock()
+	if idleTimer != nil {
+		idleTimer.Stop()
+		idleTimer = nil
+	}
+	mu.Unlock()
+	stopLoopInternal()
+}
+
+func isLoopRunning() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	return isLooping
+}
+
+func ensureConnected() {
+	mu.Lock()
+	if userToken == "" || isLooping {
 		mu.Unlock()
 		return
 	}
-	userToken = token
-	if stopChan != nil {
-		close(stopChan)
-	}
 	stopChan = make(chan struct{})
 	currentStop := stopChan
+	token := userToken
+	isLooping = true
 	mu.Unlock()
 
 	go connectionLoop(token, currentStop)
 }
 
-func StopDiscord() {
+func stopLoopInternal() {
 	mu.Lock()
-	defer mu.Unlock()
 	if stopChan != nil {
 		close(stopChan)
 		stopChan = nil
 	}
-	if wsConn != nil {
-		_ = wsConn.Close()
-		wsConn = nil
-	}
+	conn := wsConn
+	wsConn = nil
 	isConnected = false
+	isLooping = false
+	mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 func connectionLoop(token string, stop <-chan struct{}) {
+	defer func() {
+		mu.Lock()
+		if stopChan == nil {
+			isLooping = false
+		}
+		mu.Unlock()
+	}()
+
 	for {
 		select {
 		case <-stop:
@@ -85,9 +150,19 @@ func connectionLoop(token string, stop <-chan struct{}) {
 		default:
 		}
 
+		// Do not reconnect in background if music stopped playing
+		mu.Lock()
+		activeTrack := currentTrack.Title != "" && currentTrack.Playing
+		mu.Unlock()
+		if !activeTrack {
+			log.Println("[GoDiscord] No active playback, stopping connection loop to save data")
+			stopLoopInternal()
+			return
+		}
+
 		err := runSession(token, stop)
 		if err != nil {
-			log.Printf("[GoDiscord] session ended: %v, reconnecting in 5s...", err)
+			log.Printf("[GoDiscord] session ended: %v", err)
 		}
 
 		select {
@@ -99,8 +174,22 @@ func connectionLoop(token string, stop <-chan struct{}) {
 }
 
 func runSession(token string, stop <-chan struct{}) error {
-	conn, _, err := websocket.DefaultDialer.Dial(gatewayURL, nil)
+	mu.Lock()
+	dialURL := gatewayURL
+	if resumeURL != "" && sessionID != "" {
+		dialURL = resumeURL
+		if !strings.Contains(dialURL, "?") {
+			dialURL += "/?v=10&encoding=json"
+		}
+	}
+	mu.Unlock()
+
+	conn, _, err := websocket.DefaultDialer.Dial(dialURL, nil)
 	if err != nil {
+		mu.Lock()
+		resumeURL = ""
+		sessionID = ""
+		mu.Unlock()
 		return err
 	}
 
@@ -111,12 +200,15 @@ func runSession(token string, stop <-chan struct{}) error {
 
 	defer func() {
 		mu.Lock()
-		isConnected = false
-		_ = conn.Close()
+		if wsConn == conn {
+			wsConn = nil
+			isConnected = false
+		}
 		mu.Unlock()
+		_ = conn.Close()
 	}()
 
-	// 1. Waiting for Opcode 10 (Hello)
+	// 1. Read Opcode 10 (Hello)
 	var helloMsg gatewayPayload
 	if err := conn.ReadJSON(&helloMsg); err != nil {
 		return err
@@ -130,28 +222,47 @@ func runSession(token string, stop <-chan struct{}) error {
 		return err
 	}
 
-	// 2 Sending Opcode 10 (Identify)
-	identify := map[string]interface{}{
-		"op": 2,
-		"d": map[string]interface{}{
-			"token":        token,
-			"capabilities": 16381,
-			"properties": map[string]string{
-				"os":      "Android",
-				"browser": "Discord Android",
-				"device":  "Android",
+	// 2. Send RESUME (Op 6) if we have a session, otherwise minimal IDENTIFY (Op 2)
+	mu.Lock()
+	sid := sessionID
+	seqPtr := lastSeq
+	mu.Unlock()
+
+	var authPayload map[string]interface{}
+	if sid != "" && seqPtr != nil {
+		authPayload = map[string]interface{}{
+			"op": 6,
+			"d": map[string]interface{}{
+				"token":      token,
+				"session_id": sid,
+				"seq":        *seqPtr,
 			},
-		},
+		}
+	} else {
+		authPayload = map[string]interface{}{
+			"op": 2,
+			"d": map[string]interface{}{
+				"token":        token,
+				"capabilities": 0, // 0 minimizes guild/state subscriptions and saves mobile data
+				"intents":      0,
+				"properties": map[string]string{
+					"os":      "Android",
+					"browser": "Discord Android",
+					"device":  "Android",
+				},
+				"compress": false,
+			},
+		}
 	}
 
 	writeMu.Lock()
-	err = conn.WriteJSON(identify)
+	err = conn.WriteJSON(authPayload)
 	writeMu.Unlock()
 	if err != nil {
 		return err
 	}
 
-	// 3. Launching Heartbeat
+	// 3. Heartbeat goroutine
 	hbDone := make(chan struct{})
 	defer close(hbDone)
 
@@ -171,16 +282,18 @@ func runSession(token string, stop <-chan struct{}) error {
 			case <-hbDone:
 				return
 			case <-ticker.C:
+				mu.Lock()
+				s := lastSeq
+				mu.Unlock()
+
 				writeMu.Lock()
-				if conn != nil {
-					_ = conn.WriteJSON(map[string]interface{}{"op": 1, "d": nil})
-				}
+				_ = conn.WriteJSON(map[string]interface{}{"op": 1, "d": s})
 				writeMu.Unlock()
 			}
 		}
 	}()
 
-	// 4. Listening events
+	// 4. Event loop
 	for {
 		select {
 		case <-stop:
@@ -193,18 +306,53 @@ func runSession(token string, stop <-chan struct{}) error {
 			return err
 		}
 
-		// Discord approved auth
-		if msg.Op == 0 && (msg.T == "READY" || msg.T == "RESUMED") {
-			log.Println("[GoDiscord] Gateway authenticated (READY received)")
+		if msg.S != nil {
 			mu.Lock()
-			isConnected = true
-			trackSnap := currentTrack
+			val := *msg.S
+			lastSeq = &val
 			mu.Unlock()
-
-			if trackSnap.Playing && trackSnap.Title != "" {
-				go sendPresence(trackSnap)
-			}
 		}
+
+		switch msg.Op {
+		case 0: // Dispatch
+			switch msg.T {
+			case "READY":
+				var r readyData
+				if err := json.Unmarshal(msg.D, &r); err == nil {
+					mu.Lock()
+					sessionID = r.SessionID
+					resumeURL = r.ResumeGatewayURL
+					mu.Unlock()
+				}
+				onGatewayAuthenticated()
+			case "RESUMED":
+				onGatewayAuthenticated()
+			}
+
+		case 7: // Reconnect requested by Discord
+			return fmt.Errorf("gateway requested reconnect (Op 7)")
+
+		case 9: // Invalid Session
+			mu.Lock()
+			sessionID = ""
+			resumeURL = ""
+			lastSeq = nil
+			mu.Unlock()
+			return fmt.Errorf("invalid session (Op 9)")
+		}
+	}
+}
+
+func onGatewayAuthenticated() {
+	log.Println("[GoDiscord] Gateway authenticated")
+	mu.Lock()
+	isConnected = true
+	trackSnap := currentTrack
+	seqSnap := stateSeq
+	mu.Unlock()
+
+	if trackSnap.Title != "" {
+		go sendPresence(trackSnap, seqSnap)
 	}
 }
 
@@ -221,13 +369,19 @@ func UpdateTrack(
 	artist = strings.TrimSpace(artist)
 	album = strings.TrimSpace(album)
 
+	if title == "" {
+		playing = false
+	}
+
 	mu.Lock()
 	posDiff := positionMs - currentTrack.PositionMs
 	if posDiff < 0 {
 		posDiff = -posDiff
 	}
 
-	if currentTrack.Player == player &&
+	// Ignore minor position ticks only if play/pause state and track info haven't changed
+	if title != "" &&
+		currentTrack.Player == player &&
 		currentTrack.Title == title &&
 		currentTrack.Artist == artist &&
 		currentTrack.Album == album &&
@@ -237,6 +391,8 @@ func UpdateTrack(
 		return
 	}
 
+	stateSeq++
+	currentSeq := stateSeq
 	currentTrack = Track{
 		Player:     player,
 		Title:      title,
@@ -246,32 +402,71 @@ func UpdateTrack(
 		PositionMs: positionMs,
 		DurationMs: durationMs,
 	}
+
+	// Manage idle timer to disconnect WebSocket when music is paused/stopped
+	if idleTimer != nil {
+		idleTimer.Stop()
+		idleTimer = nil
+	}
+
+	if !playing {
+		idleTimer = time.AfterFunc(idleTimeout, func() {
+			mu.Lock()
+			stillPaused := !currentTrack.Playing
+			seq := stateSeq
+			mu.Unlock()
+
+			if stillPaused {
+				log.Println("[GoDiscord] Idle timeout reached, clearing presence and closing WebSocket")
+				sendPresence(Track{}, seq)
+				time.Sleep(300 * time.Millisecond)
+				stopLoopInternal()
+			}
+		})
+	}
+
 	ready := isConnected
 	mu.Unlock()
 
+	if playing {
+		ensureConnected()
+	}
+
 	if ready {
-		go sendPresence(currentTrack)
+		go sendPresence(currentTrack, currentSeq)
 	}
 }
 
-func sendPresence(t Track) {
+func sendPresence(t Track, seq uint64) {
 	var activities []map[string]interface{}
 
 	if t.Title != "" {
-		nowMs := time.Now().UnixMilli()
+		// Resolve cover BEFORE checking seq, because HTTP lookup takes time
+		var mpAsset string
+		if t.Playing {
+			mpAsset = resolveDiscordCover(t.Artist, t.Title, t.Album)
+		} else {
+			// On pause, only use already-cached cover so pause updates instantly
+			cacheKey := t.Artist + "|" + t.Album + "|" + t.Title
+			mu.Lock()
+			if cached, ok := artCache[cacheKey]; ok && cached != "none" {
+				mpAsset = cached
+			}
+			mu.Unlock()
+		}
 
-		// Генерируем поисковую ссылку на YouTube
+		nowMs := time.Now().UnixMilli()
 		ytQuery := url.QueryEscape(t.Artist + " - " + t.Title)
 		ytURL := "https://www.youtube.com/results?search_query=" + ytQuery
 
 		stateText := t.Artist
 		if !t.Playing {
-			stateText = t.Artist + " Paused ⏸️"
+			stateText = t.Artist + " • Paused ⏸️"
 		}
 
 		activity := map[string]interface{}{
 			"name":           t.Player,
-			"type":           2, // 2 = Listening to ...
+			"type":           2,
 			"application_id": discordAppID,
 			"details":        t.Title,
 			"state":          stateText,
@@ -285,7 +480,6 @@ func sendPresence(t Track) {
 			},
 		}
 
-		// Only when music plays
 		if t.Playing {
 			startMs := nowMs - t.PositionMs
 			if t.DurationMs > 0 {
@@ -300,20 +494,33 @@ func sendPresence(t Track) {
 			}
 		}
 
-		// Album picture
 		assets := map[string]string{}
 		if t.Album != "" {
 			assets["large_text"] = t.Album
 		} else {
-			assets["large_text"] = t.Player
+			assets["large_text"] = "Listening to " + t.Player
 		}
 
-		if mpAsset := resolveDiscordCover(t.Artist, t.Title, t.Album); mpAsset != "" {
+		if mpAsset != "" {
 			assets["large_image"] = mpAsset
 		}
 		activity["assets"] = assets
 
 		activities = append(activities, activity)
+	}
+
+	// Abort if a newer play/pause/stop event arrived while we were resolving artwork
+	mu.Lock()
+	if seq != stateSeq {
+		mu.Unlock()
+		return
+	}
+	conn := wsConn
+	ready := isConnected
+	mu.Unlock()
+
+	if conn == nil || !ready {
+		return
 	}
 
 	payload := map[string]interface{}{
@@ -326,21 +533,14 @@ func sendPresence(t Track) {
 		},
 	}
 
-	mu.Lock()
-	conn := wsConn
-	ready := isConnected
-	mu.Unlock()
+	writeMu.Lock()
+	err := conn.WriteJSON(payload)
+	writeMu.Unlock()
 
-	if conn != nil && ready {
-		writeMu.Lock()
-		err := conn.WriteJSON(payload)
-		writeMu.Unlock()
-
-		if err != nil {
-			log.Printf("[GoDiscord] failed to send presence: %v", err)
-		} else {
-			log.Printf("[GoDiscord] updated presence: [%s] %s - %s (playing=%v)", t.Player, t.Artist, t.Title, t.Playing)
-		}
+	if err != nil {
+		log.Printf("[GoDiscord] failed to send presence: %v", err)
+	} else {
+		log.Printf("[GoDiscord] updated presence: [%s] %s - %s (playing=%v)", t.Player, t.Artist, t.Title, t.Playing)
 	}
 }
 
@@ -349,6 +549,9 @@ func resolveDiscordCover(artist, title, album string) string {
 	mu.Lock()
 	if cached, ok := artCache[cacheKey]; ok {
 		mu.Unlock()
+		if cached == "none" {
+			return ""
+		}
 		return cached
 	}
 	token := userToken
@@ -356,6 +559,9 @@ func resolveDiscordCover(artist, title, album string) string {
 
 	rawURL := fetchItunesArtwork(artist, title, album)
 	if rawURL == "" || token == "" {
+		mu.Lock()
+		artCache[cacheKey] = "none" // Cache negative result to avoid repeated lookups
+		mu.Unlock()
 		return ""
 	}
 
