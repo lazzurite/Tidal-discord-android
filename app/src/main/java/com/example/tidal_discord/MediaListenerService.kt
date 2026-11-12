@@ -6,14 +6,27 @@ import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.os.Handler
+import android.os.Looper
 import android.service.notification.NotificationListenerService
+import android.service.notification.StatusBarNotification
 import android.util.Log
 import bridge.Bridge
 
 class MediaListenerService : NotificationListenerService() {
 
-    private val controllers = mutableMapOf<MediaController, MediaController.Callback>()
+    private val controllers = mutableMapOf<String, MediaController>()
+    private val callbacks = mutableMapOf<String, MediaController.Callback>()
     private lateinit var sessionManager: MediaSessionManager
+    private val handler = Handler(Looper.getMainLooper())
+
+    // Резервный опрос каждые 5 секунд, чтобы статус никогда не замораживался
+    private val syncRunnable = object : Runnable {
+        override fun run() {
+            pollAllActiveSessions()
+            handler.postDelayed(this, 5000L)
+        }
+    }
 
     private fun isSupportedPackage(pkg: String): Boolean {
         return pkg == "com.aspiro.tidal" || pkg.startsWith("com.hiby.music")
@@ -49,21 +62,65 @@ class MediaListenerService : NotificationListenerService() {
         try {
             sessionManager = getSystemService(MediaSessionManager::class.java)
             val component = ComponentName(this, MediaListenerService::class.java)
-
             sessionManager.addOnActiveSessionsChangedListener(sessionListener, component)
-
-            sessionManager.getActiveSessions(component).forEach { controller ->
-                if (isSupportedPackage(controller.packageName)) {
-                    registerController(controller)
-                }
-            }
+            pollAllActiveSessions()
         } catch (e: Exception) {
             Log.e("TidalDiscord", "Failed to attach MediaSessionManager", e)
+        }
+
+        handler.post(syncRunnable)
+    }
+
+    // Срабатывает мгновенно каждый раз, когда плеер меняет трек в шторке уведомлений!
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        val pkg = sbn?.packageName ?: return
+        if (isSupportedPackage(pkg)) {
+            pollAllActiveSessions()
+        }
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification?) {
+        val pkg = sbn?.packageName ?: return
+        if (isSupportedPackage(pkg)) {
+            pollAllActiveSessions()
+        }
+    }
+
+    private fun pollAllActiveSessions() {
+        if (!::sessionManager.isInitialized) return
+        try {
+            val component = ComponentName(this, MediaListenerService::class.java)
+            val activeSessions = sessionManager.getActiveSessions(component)
+            var foundSupported = false
+
+            for (controller in activeSessions) {
+                if (isSupportedPackage(controller.packageName)) {
+                    foundSupported = true
+                    registerController(controller)
+                    sendTrackToGo(controller)
+                }
+            }
+
+            // Если оба плеера закрыты и сессий больше нет — очищаем статус
+            if (!foundSupported && controllers.isNotEmpty()) {
+                controllers.clear()
+                callbacks.clear()
+                Bridge.updateTrack("Music", "", "", "", false, 0L, 0L)
+            }
+        } catch (e: Exception) {
+            Log.e("TidalDiscord", "Error polling sessions", e)
         }
     }
 
     private fun registerController(controller: MediaController) {
-        if (controllers.containsKey(controller)) return
+        val pkg = controller.packageName
+        val existing = controllers[pkg]
+        if (existing?.sessionToken == controller.sessionToken) {
+            return
+        }
+
+        // Если токен сессии обновился — переподписываемся
+        callbacks[pkg]?.let { oldCb -> existing?.unregisterCallback(oldCb) }
 
         val callback = object : MediaController.Callback() {
             override fun onMetadataChanged(metadata: MediaMetadata?) {
@@ -75,16 +132,18 @@ class MediaListenerService : NotificationListenerService() {
             }
 
             override fun onSessionDestroyed() {
-                controllers.remove(controller)
+                controllers.remove(pkg)
+                callbacks.remove(pkg)
                 Bridge.updateTrack(
-                    playerDisplayName(controller.packageName),
+                    playerDisplayName(pkg),
                     "", "", "", false, 0L, 0L
                 )
             }
         }
 
         controller.registerCallback(callback)
-        controllers[controller] = callback
+        controllers[pkg] = controller
+        callbacks[pkg] = callback
         sendTrackToGo(controller)
     }
 
@@ -93,7 +152,6 @@ class MediaListenerService : NotificationListenerService() {
         val state = controller.playbackState
         val pbState = state?.state ?: PlaybackState.STATE_NONE
 
-        // Если плеер полностью остановлен или закрыт — очищаем статус
         if (pbState == PlaybackState.STATE_STOPPED || pbState == PlaybackState.STATE_NONE || pbState == PlaybackState.STATE_ERROR) {
             Bridge.updateTrack(playerDisplayName(controller.packageName), "", "", "", false, 0L, 0L)
             return
@@ -126,15 +184,17 @@ class MediaListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        handler.removeCallbacks(syncRunnable)
         try {
             if (::sessionManager.isInitialized) {
                 sessionManager.removeOnActiveSessionsChangedListener(sessionListener)
             }
-            for ((controller, callback) in controllers) {
-                controller.unregisterCallback(callback)
+            for ((pkg, controller) in controllers) {
+                callbacks[pkg]?.let { controller.unregisterCallback(it) }
             }
         } catch (_: Exception) {}
         controllers.clear()
+        callbacks.clear()
         Bridge.stopDiscord()
         super.onListenerDisconnected()
     }

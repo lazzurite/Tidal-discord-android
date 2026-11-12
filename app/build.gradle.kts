@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.lazzurite.tidaldiscord"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4       // Было 3, увеличиваем для обновления поверх 1.2
+        versionName = "1.3"   // Новая версия
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

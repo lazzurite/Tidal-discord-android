@@ -240,19 +240,19 @@ func runSession(token string, stop <-chan struct{}) error {
 		}
 	} else {
 		authPayload = map[string]interface{}{
-			"op": 2,
-			"d": map[string]interface{}{
-				"token":        token,
-				"capabilities": 0, // 0 minimizes guild/state subscriptions and saves mobile data
-				"intents":      0,
-				"properties": map[string]string{
-					"os":      "Android",
-					"browser": "Discord Android",
-					"device":  "Android",
-				},
-				"compress": false,
-			},
-		}
+        			"op": 2,
+        			"d": map[string]interface{}{
+        				"token":        token,
+        				"capabilities": 0,
+        				"intents":      0,
+        				"properties": map[string]string{
+        					"os":      "Windows",
+        					"browser": "Discord Client",
+        					"device":  "",
+        				},
+        				"compress": false,
+        			},
+        		}
 	}
 
 	writeMu.Lock()
